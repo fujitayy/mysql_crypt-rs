@@ -4,14 +4,14 @@
 use crypto::aes;
 use crypto::blockmodes::PkcsPadding;
 use crypto::buffer::{BufferResult, ReadBuffer, RefReadBuffer, RefWriteBuffer, WriteBuffer};
-use crypto::symmetriccipher::{Encryptor, SymmetricCipherError};
+use crypto::symmetriccipher::SymmetricCipherError;
 use std::ops::Deref;
 
 #[derive(Debug, thiserror::Error)]
 pub enum MysqlEncryptError {
     #[error("MysqlEncryptError: Buffer overflow")]
     BufferOverflow,
-    #[error("MysqlEncryptError: {0}")]
+    #[error("MysqlEncryptError: {0:?}")]
     SymmetricCipherError(SymmetricCipherError),
 }
 
@@ -19,16 +19,16 @@ pub enum MysqlEncryptError {
 pub enum MysqlDecryptError {
     #[error("MysqlDecryptError: Buffer overflow")]
     BufferOverflow,
-    #[error("MysqlDecryptError: {0}")]
+    #[error("MysqlDecryptError: {0:?}")]
     SymmetricCipherError(SymmetricCipherError),
 }
 
 #[derive(Debug, thiserror::Error)]
 pub enum MysqlDecryptFromBase64Error {
     #[error("MysqlDecryptFromBase64Error: {0}")]
-    MysqlDecryptError(MysqlDecryptError),
+    MysqlDecryptError(#[from] MysqlDecryptError),
     #[error("MysqlDecryptFromBase64Error: {0}")]
-    Base64DecodeError(base64::DecodeError),
+    Base64DecodeError(#[from] base64::DecodeError),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -75,7 +75,10 @@ impl MysqlAes128 {
             let mut encryptor =
                 aes::ecb_encryptor(aes::KeySize::KeySize128, &self.key, PkcsPadding);
             let mut r_buf = RefReadBuffer::new(plain_text);
-            if let BufferResult::BufferOverflow = encryptor.encrypt(&mut r_buf, &mut w_buf, true)? {
+            if let BufferResult::BufferOverflow = encryptor
+                .encrypt(&mut r_buf, &mut w_buf, true)
+                .map_err(MysqlEncryptError::SymmetricCipherError)?
+            {
                 return Err(MysqlEncryptError::BufferOverflow);
             }
         }
@@ -96,7 +99,10 @@ impl MysqlAes128 {
         let mut r_buf = RefReadBuffer::new(encrypted);
         let mut buf = vec![0; encrypted.len()];
         let mut w_buf = RefWriteBuffer::new(&mut buf);
-        if let BufferResult::BufferOverflow = decryptor.decrypt(&mut r_buf, &mut w_buf, true)? {
+        if let BufferResult::BufferOverflow = decryptor
+            .decrypt(&mut r_buf, &mut w_buf, true)
+            .map_err(MysqlDecryptError::SymmetricCipherError)?
+        {
             return Err(MysqlDecryptError::BufferOverflow);
         }
 
@@ -110,7 +116,7 @@ impl MysqlAes128 {
     pub fn decrypt_from_base64(
         &self,
         encrypted_base64: &str,
-    ) -> Result<Vec<u8>, MysqlDecryptError> {
+    ) -> Result<Vec<u8>, MysqlDecryptFromBase64Error> {
         self.decrypt(base64::decode(encrypted_base64)?.as_slice())
             .map_err(From::from)
     }
