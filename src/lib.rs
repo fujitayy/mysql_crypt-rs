@@ -1,11 +1,35 @@
 //! # mysql_crypt
 //!
 
-use anyhow::{anyhow, bail, Result};
 use crypto::aes;
 use crypto::blockmodes::PkcsPadding;
 use crypto::buffer::{BufferResult, ReadBuffer, RefReadBuffer, RefWriteBuffer, WriteBuffer};
-use crypto::symmetriccipher::Encryptor;
+use crypto::symmetriccipher::{Encryptor, SymmetricCipherError};
+use std::ops::Deref;
+
+#[derive(Debug, thiserror::Error)]
+pub enum MysqlEncryptError {
+    #[error("MysqlEncryptError: Buffer overflow")]
+    BufferOverflow,
+    #[error("MysqlEncryptError: {0}")]
+    SymmetricCipherError(SymmetricCipherError),
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum MysqlDecryptError {
+    #[error("MysqlDecryptError: Buffer overflow")]
+    BufferOverflow,
+    #[error("MysqlDecryptError: {0}")]
+    SymmetricCipherError(SymmetricCipherError),
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum MysqlDecryptFromBase64Error {
+    #[error("MysqlDecryptFromBase64Error: {0}")]
+    MysqlDecryptError(MysqlDecryptError),
+    #[error("MysqlDecryptFromBase64Error: {0}")]
+    Base64DecodeError(base64::DecodeError),
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Encrypted(pub Vec<u8>);
@@ -13,6 +37,14 @@ pub struct Encrypted(pub Vec<u8>);
 impl Encrypted {
     pub fn to_base64(&self) -> String {
         base64::encode(&self.0)
+    }
+}
+
+impl Deref for Encrypted {
+    type Target = [u8];
+
+    fn deref(&self) -> &Self::Target {
+        self.0.as_slice()
     }
 }
 
@@ -32,7 +64,7 @@ impl MysqlAes128 {
         MysqlAes128 { key }
     }
 
-    pub fn encrypt(&self, plain_text: &[u8]) -> Result<Encrypted> {
+    pub fn encrypt(&self, plain_text: &[u8]) -> Result<Encrypted, MysqlEncryptError> {
         if plain_text.is_empty() {
             return Ok(Encrypted(Vec::new()));
         }
@@ -43,11 +75,8 @@ impl MysqlAes128 {
             let mut encryptor =
                 aes::ecb_encryptor(aes::KeySize::KeySize128, &self.key, PkcsPadding);
             let mut r_buf = RefReadBuffer::new(plain_text);
-            if let BufferResult::BufferOverflow = encryptor
-                .encrypt(&mut r_buf, &mut w_buf, true)
-                .map_err(|err| anyhow!("{:?}", err))?
-            {
-                bail!("BufferOverflow");
+            if let BufferResult::BufferOverflow = encryptor.encrypt(&mut r_buf, &mut w_buf, true)? {
+                return Err(MysqlEncryptError::BufferOverflow);
             }
         }
 
@@ -58,7 +87,7 @@ impl MysqlAes128 {
         Ok(Encrypted(encoded))
     }
 
-    pub fn decrypt(&self, encrypted: &[u8]) -> Result<Vec<u8>> {
+    pub fn decrypt(&self, encrypted: &[u8]) -> Result<Vec<u8>, MysqlDecryptError> {
         if encrypted.is_empty() {
             return Ok(Vec::new());
         }
@@ -67,11 +96,8 @@ impl MysqlAes128 {
         let mut r_buf = RefReadBuffer::new(encrypted);
         let mut buf = vec![0; encrypted.len()];
         let mut w_buf = RefWriteBuffer::new(&mut buf);
-        if let BufferResult::BufferOverflow = decryptor
-            .decrypt(&mut r_buf, &mut w_buf, true)
-            .map_err(|err| anyhow!("{:?}", err))?
-        {
-            bail!("BufferOverflow");
+        if let BufferResult::BufferOverflow = decryptor.decrypt(&mut r_buf, &mut w_buf, true)? {
+            return Err(MysqlDecryptError::BufferOverflow);
         }
 
         let mut r_buf = w_buf.take_read_buffer();
@@ -79,6 +105,14 @@ impl MysqlAes128 {
         let mut decoded = Vec::with_capacity(remain.len());
         decoded.extend(remain.iter().to_owned());
         Ok(decoded)
+    }
+
+    pub fn decrypt_from_base64(
+        &self,
+        encrypted_base64: &str,
+    ) -> Result<Vec<u8>, MysqlDecryptError> {
+        self.decrypt(base64::decode(encrypted_base64)?.as_slice())
+            .map_err(From::from)
     }
 }
 
